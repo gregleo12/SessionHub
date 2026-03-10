@@ -17,6 +17,8 @@ struct MenuBarView: View {
 
             if !store.isITerm2Running {
                 notRunningView
+            } else if !store.isAPIConnected {
+                apiNotConnectedView
             } else if store.projectGroups.isEmpty {
                 emptyView
             } else {
@@ -194,6 +196,26 @@ struct MenuBarView: View {
         .padding(.vertical, 24)
     }
 
+    private var apiNotConnectedView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.largeTitle)
+                .foregroundStyle(.tertiary)
+            Text("iTerm2 API not available")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text("Enable Python API in iTerm2:")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Text("Settings \u{2192} General \u{2192} Magic \u{2192} Enable Python API")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+    }
+
     private var emptyView: some View {
         VStack(spacing: 8) {
             Image(systemName: "tray")
@@ -226,6 +248,15 @@ struct MenuBarView: View {
             Spacer()
 
             Button {
+                relaunchApp()
+            } label: {
+                Label("Restart", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+
+            Button {
                 NSApplication.shared.terminate(nil)
             } label: {
                 Label("Quit", systemImage: "power")
@@ -236,6 +267,19 @@ struct MenuBarView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private func relaunchApp() {
+        let bundlePath = Bundle.main.bundlePath
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-n", bundlePath]
+        try? process.run()
+
+        // Give the new instance a moment to start, then quit this one
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApplication.shared.terminate(nil)
+        }
     }
 
     // MARK: - Helpers

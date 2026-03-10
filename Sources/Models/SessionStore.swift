@@ -8,7 +8,7 @@ struct ProjectGroup: Identifiable {
     var sessions: [ITerm2Bridge.SessionInfo]
     var isExpanded: Bool = true
 
-    var windowIds: Set<Int> {
+    var windowIds: Set<String> {
         Set(sessions.map(\.windowId))
     }
 
@@ -20,22 +20,30 @@ struct ProjectGroup: Identifiable {
 }
 
 /// Observable store that polls iTerm2 and maintains the current state.
-/// All AppleScript calls run on a background queue to keep the UI snappy.
 @Observable
 final class SessionStore {
     var projectGroups: [ProjectGroup] = []
     var isITerm2Running: Bool = false
+    var isAPIConnected: Bool = false
     var lastUpdated: Date?
 
     private let bridge = ITerm2Bridge()
     private var timer: Timer?
     private var pollingInterval: TimeInterval = 2.0
-    private let backgroundQueue = DispatchQueue(label: "com.sessionhub.bridge", qos: .userInitiated)
+    private var hasCompletedInitialRefresh = false
+
+    /// Low-priority queue for background polling — never blocks user actions
+    private var isRefreshing = false
+    private let pollQueue = DispatchQueue(label: "com.sessionhub.poll", qos: .userInitiated)
+    /// High-priority queue for user-triggered actions — runs immediately
+    private let actionQueue = DispatchQueue(label: "com.sessionhub.action", qos: .userInteractive)
 
     // MARK: - Polling
 
     func startPolling(interval: TimeInterval = 2.0) {
         pollingInterval = interval
+        SHLog.log("[SessionHub] Starting polling (interval: \(interval)s) — no TCC needed")
+
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: pollingInterval, repeats: true) { [weak self] _ in
             self?.refresh()
@@ -50,41 +58,75 @@ final class SessionStore {
     // MARK: - Refresh
 
     func refresh() {
-        backgroundQueue.async { [weak self] in
+        if !hasCompletedInitialRefresh {
+            SHLog.log("[SessionHub] Running initial refresh")
+            pollQueue.async { [weak self] in
+                self?.performRefresh()
+                self?.hasCompletedInitialRefresh = true
+            }
+            return
+        }
+
+        pollQueue.async { [weak self] in
             guard let self else { return }
-
-            let running = self.bridge.isITerm2Running()
-            let groups: [ProjectGroup]
-
-            if running {
-                let windows = self.bridge.fetchSessions()
-                groups = Self.groupByProfile(windows: windows)
-            } else {
-                groups = []
+            guard !self.isRefreshing else {
+                SHLog.log("[SessionHub] Skipping refresh — previous poll still running")
+                return
             }
-
-            DispatchQueue.main.async {
-                self.isITerm2Running = running
-                self.projectGroups = groups
-                self.lastUpdated = Date()
-            }
+            self.performRefresh()
         }
     }
 
-    // MARK: - Actions
+    private func performRefresh() {
+        isRefreshing = true
+
+        let running = bridge.isITerm2Running()
+        let groups: [ProjectGroup]
+        let connected: Bool
+
+        if running {
+            connected = bridge.ensureConnected()
+            if connected {
+                let windows = bridge.fetchSessions()
+                if windows.isEmpty {
+                    SHLog.log("[SessionHub] iTerm2 API returned no windows")
+                } else {
+                    SHLog.log("[SessionHub] Found \(windows.count) window(s)")
+                }
+                groups = Self.groupByProfile(windows: windows)
+            } else {
+                SHLog.log("[SessionHub] iTerm2 running but API not connected")
+                groups = []
+            }
+        } else {
+            SHLog.log("[SessionHub] iTerm2 is not running")
+            connected = false
+            groups = []
+        }
+
+        DispatchQueue.main.async {
+            self.isITerm2Running = running
+            self.isAPIConnected = connected
+            self.projectGroups = groups
+            self.lastUpdated = Date()
+            self.isRefreshing = false
+        }
+    }
+
+    // MARK: - Actions (all run on separate high-priority queue)
 
     func switchToSession(_ session: ITerm2Bridge.SessionInfo) {
-        backgroundQueue.async { [weak self] in
-            self?.bridge.switchToSession(windowId: session.windowId, tabIndex: session.tabIndex)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        actionQueue.async { [weak self] in
+            self?.bridge.switchToSession(sessionId: session.id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self?.refresh()
             }
         }
     }
 
-    func createTab(forProfile profile: String, inWindowId windowId: Int) {
-        backgroundQueue.async { [weak self] in
-            self?.bridge.createTab(inWindowId: windowId, withProfile: profile)
+    func createTab(forProfile profile: String, inWindowId windowId: String) {
+        actionQueue.async { [weak self] in
+            self?.bridge.createTab(withProfile: profile, inWindowId: windowId)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 self?.refresh()
             }
@@ -92,7 +134,7 @@ final class SessionStore {
     }
 
     func createWindow(withProfile profile: String) {
-        backgroundQueue.async { [weak self] in
+        actionQueue.async { [weak self] in
             self?.bridge.createWindow(withProfile: profile)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 self?.refresh()
@@ -101,13 +143,8 @@ final class SessionStore {
     }
 
     func renameSession(_ session: ITerm2Bridge.SessionInfo, to name: String) {
-        backgroundQueue.async { [weak self] in
-            self?.bridge.renameSession(
-                windowId: session.windowId,
-                tabIndex: session.tabIndex,
-                sessionIndex: session.sessionIndex,
-                name: name
-            )
+        actionQueue.async { [weak self] in
+            self?.bridge.renameSession(sessionId: session.id, name: name)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 self?.refresh()
             }
